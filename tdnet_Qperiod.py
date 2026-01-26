@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-TDnet適時開示情報.xlsm の決算期・四半期自動判定スクリプト
-追加機能: ファイル使用中チェックと対話メッセージ
-"""
 
 import re
 import unicodedata
@@ -11,13 +7,13 @@ import time
 import os
 from datetime import datetime
 from calendar import monthrange
-import openpyxl
+import win32com.client  # pywin32を使用
 
 # =================================================================
 # 1. 設定エリア
 # =================================================================
 TARGET_FILE_PATH = r'\\LS720D7A9\TakashiBK\投資\TDNET\TDnet適時情報開示サービス\TDnet適時開示情報.xlsm'
-START_ROW = 39649
+START_ROW = 40287
 # =================================================================
 
 ERA_TO_YEAR = {
@@ -68,85 +64,90 @@ def extract_quarter(text):
     if re.search(r'下半期|下期|通期', normalized): return '4Q'
     return None
 
-def validate_results(ws, start_row, max_row):
-    print("\n=== 検収チェック開始 ===")
-    error_count = 0
-    for row_idx in range(start_row, min(max_row + 1, start_row + 1000)):
-        if '第' in str(ws[f'D{row_idx}'].value) and ws[f'L{row_idx}'].value == '4Q':
-            error_count += 1
-    print(f"  チェック1: 第X四半期が4Qの行数(サンプル): {error_count}")
-    print("=== 検収チェック完了 ===\n")
-
-def is_file_writable(filepath):
-    """ファイルが書き込み可能か（他のプロセスに開かれていないか）チェック"""
-    if not os.path.exists(filepath):
-        return True
-    try:
-        # 追記モードで開いてみて、すぐに閉じる
-        f = open(filepath, 'a')
-        f.close()
-        return True
-    except IOError:
-        return False
-
-def process_tdnet_file(file_path, start_row):
+def process_with_win32com(file_path, start_row):
     start_time = time.time()
     
-    # 読み込み
-    print(f"ファイルを読み込み中: {file_path}")
+    print(f"Excelを操作中...")
     try:
-        wb = openpyxl.load_workbook(file_path, keep_vba=True)
-    except Exception as e:
-        print(f"エラー: 読み込み失敗: {e}")
+        # Excelアプリケーションに接続
+        excel = win32com.client.GetActiveObject("Excel.Application")
+    except:
+        # Excelが起動していない場合は新しく起動
+        excel = win32com.client.Dispatch("Excel.Application")
+    
+    excel.Visible = True # 処理を見えるようにする
+    
+    # 目的のブックを探す、なければ開く
+    target_wb = None
+    for wb in excel.Workbooks:
+        if wb.FullName.lower() == file_path.lower():
+            target_wb = wb
+            break
+    
+    if not target_wb:
+        print(f"ファイルを開きます: {file_path}")
+        target_wb = excel.Workbooks.Open(file_path)
+
+    ws = target_wb.ActiveSheet
+    # A列の最終行を取得（ExcelのxlUpを使用）
+    max_row = ws.Cells(ws.Rows.Count, "A").End(-4162).Row # -4162 = xlUp
+
+    if max_row < start_row:
+        print("処理対象の行がありません。")
         return
 
-    ws = wb.active
-    max_row = ws.max_row
-    updated_count = 0
+    # 1. データの読み取り (D列: タイトルを一括取得)
+    titles = ws.Range(ws.Cells(start_row, 4), ws.Cells(max_row, 4)).Value
     
-    # データ処理
-    for row_idx in range(start_row, max_row + 1):
-        title = ws[f'D{row_idx}'].value
-        if not title or not isinstance(title, str): continue
-        
-        # J列: 種別
-        rtype = extract_report_type(title)
-        if rtype: ws[f'J{row_idx}'].value = rtype
-        
-        # K, L列: 決算期, 四半期
-        period = extract_fiscal_period(title)
-        if period:
-            ws[f'K{row_idx}'].value = datetime(period[0], period[1], monthrange(period[0], period[1])[1])
-            ws[f'K{row_idx}'].number_format = 'yy/mm/dd'
-            ws[f'L{row_idx}'].value = extract_quarter(title) or '4Q'
-            updated_count += 1
+    # 書き込み用データ作成 (J, K, L列分)
+    output_data = []
+    updated_count = 0
 
-    print(f"\n処理完了: {updated_count}件のデータをメモリ上にセットしました。")
-    validate_results(ws, start_row, max_row)
-
-    # 保存処理の判定
-    if is_file_writable(file_path):
-        try:
-            wb.save(file_path)
-            print(f"保存に成功しました！ (経過時間: {time.time() - start_time:.2f}秒)")
-        except Exception as e:
-            print(f"保存エラーが発生しました: {e}")
-    else:
-        # ファイルが開かれている場合のメッセージ
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(f"警告: ファイルがExcel等で開かれているため、保存ができません。")
-        print(f"対象: {file_path}")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    # 2. ロジック処理
+    for i, row in enumerate(titles):
+        title = row[0]
+        row_rtype = ""
+        row_period = ""
+        row_q = ""
         
-        user_input = input("このまま保存せずに処理を終了しますか？ (y/n): ").lower()
-        if user_input == 'y':
-            print("保存せずに終了します。データは更新されていません。")
-        else:
-            print("プログラムを中断しました。ファイルを閉じてから再実行してください。")
+        if title and isinstance(title, str):
+            # 種別判定
+            row_rtype = extract_report_type(title)
+            
+            # 決算期・四半期判定
+            period = extract_fiscal_period(title)
+            if period:
+                last_day = monthrange(period[0], period[1])[1]
+                # 日付形式を文字列で作成（Excelへの流し込み用）
+                row_period = f"{period[0]}/{period[1]}/{last_day}"
+                row_q = extract_quarter(title) or '4Q'
+                updated_count += 1
+        
+        # 取得した既存の値を保持しつつ、新しく判定したものをセット
+        # (J列, K列, L列) の形式でリスト化
+        output_data.append([row_rtype, row_period, row_q])
+
+    # 3. データの書き込み (J列〜L列の範囲を一括更新)
+    if output_data:
+        write_range = ws.Range(ws.Cells(start_row, 10), ws.Cells(max_row, 12))
+        write_range.Value = output_data
+        # K列の書式設定（yy/mm/dd）
+        ws.Range(ws.Cells(start_row, 11), ws.Cells(max_row, 11)).NumberFormat = "yy/mm/dd"
+
+    end_time = time.time()
+    
+    # 結果出力
+    print("-" * 40)
+    print(f"【処理結果】")
+    print(f"全対象行数: {len(titles)}件")
+    print(f"判定成功数: {updated_count}件")
+    print(f"処理時間  : {end_time - start_time:.2f}秒")
+    print("-" * 40)
+    print("完了しました。Excelは開いたままですので、内容を確認して保存してください。")
 
 if __name__ == '__main__':
-    print(f"--- TDnet 判定スクリプト (ファイルチェック機能付) ---")
+    print(f"--- TDnet 判定スクリプト (pywin32版: 開いたまま更新) ---")
     try:
-        process_tdnet_file(TARGET_FILE_PATH, START_ROW)
+        process_with_win32com(TARGET_FILE_PATH, START_ROW)
     except Exception as e:
-        print(f"予期せぬエラー: {e}")
+        print(f"エラーが発生しました: {e}")

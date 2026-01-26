@@ -2,6 +2,7 @@ import os
 import sqlite3
 import duckdb
 import time
+import glob  # 追加：ファイル検索用
 from datetime import datetime
 
 # --- 設定 ---
@@ -16,7 +17,12 @@ DB_FOLDER = r"\\LS720D7A9\TakashiBK\投資\MyPython" # フォルダパス
 DB_NAME = "python_script_list.db" # ファイル名
 
 # 除外したいフォルダ名
-EXCLUDE_DIRS = {".venv", "__pycache__", ".git", ".ipynb_checkpoints"}
+EXCLUDE_DIRS = {
+    ".venv", "__pycache__", ".git", ".ipynb_checkpoints", 
+    "chrome-win64", "chromedriver-win64", "BackUp", "_archive"
+}
+# 除外したいフォルダは時々で追加/削除する　例えばBackUpファイルなど
+# EXCLUDE_DIRS = {".venv", "__pycache__", ".git", ".ipynb_checkpoints"}
 
 def extract_metadata(lines):
     """# --- metadata --- セクションからメタデータを抽出"""
@@ -84,6 +90,15 @@ def run():
     # Obsidianフォルダの作成
     if not os.path.exists(OBSIDIAN_DIR):
         os.makedirs(OBSIDIAN_DIR)
+    else:
+        # --- 追加処理: Obsidianフォルダ内の既存の .md ファイルをすべて削除 ---
+        existing_md_files = glob.glob(os.path.join(OBSIDIAN_DIR, "*.md"))
+        for f in existing_md_files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f"削除エラー ({os.path.basename(f)}): {e}")
+        print(f"Obsidian出力先をクリーンアップしました: {len(existing_md_files)}個のファイルを削除")
         
     # --- 代替案の工夫：DBフォルダの自動作成 ---
     if not os.path.exists(DB_FOLDER):

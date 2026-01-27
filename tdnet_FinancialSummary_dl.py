@@ -18,8 +18,8 @@ SHEET_NAME = '適時開示情報'
 PDF_FOLDER = os.path.join(BASE_DIR, "TDnet(決算短信)-PDF-随時追加分")
 XBRL_FOLDER = os.path.join(BASE_DIR, "TDnet(決算短信)XBRL-随時追加分")
 
-# 開始行 (VBAの37690行目付近。必要に応じて調整してください)
-START_ROW_INDEX = 37504
+# 開始行 
+START_ROW_INDEX = 40287
 MAX_WORKERS = 15  # 同時実行数
 # ==========================================
 

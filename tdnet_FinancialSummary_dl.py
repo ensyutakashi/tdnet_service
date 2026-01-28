@@ -1,20 +1,17 @@
 import os
 import requests
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import time
 import win32com.client
+import pythoncom
 
 # ================= config =================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-os.chdir(BASE_DIR)
-
-EXCEL_FILE = os.path.join(BASE_DIR, "TDnet適時開示情報.xlsm")
+EXCEL_FILE = r'\\LS720D7A9\TakashiBK\投資\TDNET\TDnet適時情報開示サービス\TDnet適時開示情報.xlsm'
+BASE_DIR = os.path.dirname(EXCEL_FILE)
 SHEET_NAME = '適時開示情報'
-
 PDF_FOLDER = os.path.join(BASE_DIR, "TDnet(決算短信)-PDF-随時追加分")
 XBRL_FOLDER = os.path.join(BASE_DIR, "TDnet(決算短信)XBRL-随時追加分")
-
 START_ROW_INDEX = 40287
 MAX_WORKERS = 15
 # ==========================================
@@ -26,7 +23,8 @@ def download_file(url, save_path):
     try:
         if not url or not str(url).startswith('http'):
             return "失敗: URL不正"
-        response = requests.get(url, timeout=30)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, timeout=30, headers=headers)
         if response.status_code == 200:
             with open(save_path, 'wb') as f:
                 f.write(response.content)
@@ -36,92 +34,134 @@ def download_file(url, save_path):
         return f"失敗: {str(e)}"
 
 def main():
-    start_time = time.time()
+    script_start_time = time.time() # 全体開始時間
+    print(f"--- スクリプト開始 [{datetime.now().strftime('%H:%M:%S')}] ---")
+    
     os.makedirs(PDF_FOLDER, exist_ok=True)
     os.makedirs(XBRL_FOLDER, exist_ok=True)
 
-    print(f"Excelを制御しています... (win32com使用)")
-    try:
-        excel = win32com.client.GetActiveObject("Excel.Application")
-    except:
-        excel = win32com.client.Dispatch("Excel.Application")
-    
-    excel.Visible = True 
+    pythoncom.CoInitialize()
+    excel = None
+    wb = None
     
     try:
-        wb = excel.Workbooks.Open(EXCEL_FILE)
+        # Excel接続
+        try:
+            excel = win32com.client.GetActiveObject("Excel.Application")
+        except:
+            excel = win32com.client.Dispatch("Excel.Application")
+            excel.Visible = True
+        
+        # ブック取得
+        wb = None
+        for open_wb in excel.Workbooks:
+            if open_wb.FullName.lower() == EXCEL_FILE.lower():
+                wb = open_wb
+                break
+        if not wb:
+            wb = excel.Workbooks.Open(EXCEL_FILE)
+
+        ws = wb.Worksheets(SHEET_NAME)
+        max_row = ws.Cells(ws.Rows.Count, "A").End(-4162).Row
+
+        # 列特定
+        headers = ws.Rows(1).Value[0]
+        def find_col(name, default):
+            try: return headers.index(name) + 1
+            except: return default
+
+        COL_PDF_URL = find_col("表題", 4)
+        COL_XBRL_URL = find_col("XBRL", 5)
+        COL_FILENAME = find_col("ファイル名(連番+公開日+時刻+(種別)+決算月+4Q+コード+会社名+表題)", 13)
+        COL_PDF_RES = find_col("pdfDL", 14)
+        COL_XBRL_RES = find_col("xbrlDL", 15)
+
+        # タスク抽出
+        tasks = []
+        for r in range(START_ROW_INDEX, max_row + 1):
+            fname = ws.Cells(r, COL_FILENAME).Value
+            p_res = ws.Cells(r, COL_PDF_RES).Value
+            x_res = ws.Cells(r, COL_XBRL_RES).Value
+            
+            p_url = None
+            if not p_res or str(p_res).strip() in ["", "None"]:
+                c = ws.Cells(r, COL_PDF_URL)
+                p_url = c.Hyperlinks(1).Address if c.Hyperlinks.Count > 0 else c.Value
+            
+            x_url = None
+            if not x_res or str(x_res).strip() in ["", "None"]:
+                c = ws.Cells(r, COL_XBRL_URL)
+                x_url = c.Hyperlinks(1).Address if c.Hyperlinks.Count > 0 else c.Value
+
+            if (p_url or x_url) and fname:
+                tasks.append({"row": r, "fname": fname, "p_url": p_url, "x_url": x_url})
+
+        if not tasks:
+            print("処理対象の新規データはありません。")
+            return
+
+        # ダウンロード実行
+        print(f"ダウンロード開始: {len(tasks)}件 (並列数:{MAX_WORKERS})")
+        dl_start_time = time.time()
+        
+        results = []
+        def execute_task(t):
+            res = {"row": t["row"], "p_msg": None, "x_msg": None}
+            if t["p_url"] and str(t["p_url"]).startswith("http"):
+                fn = str(t["fname"]) if str(t["fname"]).lower().endswith(".pdf") else f"{t['fname']}.pdf"
+                res["p_msg"] = get_timestamp_msg(download_file(t["p_url"], os.path.join(PDF_FOLDER, fn)))
+            if t["x_url"] and str(t["x_url"]).startswith("http"):
+                fn = str(t["fname"]).replace(".pdf", "").replace(".PDF", "") + ".zip"
+                res["x_msg"] = get_timestamp_msg(download_file(t["x_url"], os.path.join(XBRL_FOLDER, fn)))
+            return res
+
+        # 進捗表示付きで実行
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_task = {executor.submit(execute_task, t): t for t in tasks}
+            completed_count = 0
+            for future in as_completed(future_to_task):
+                results.append(future.result())
+                completed_count += 1
+                if completed_count % 10 == 0 or completed_count == len(tasks):
+                    print(f"  進捗: {completed_count}/{len(tasks)} 件完了...", end="\r")
+
+        dl_end_time = time.time()
+        print(f"\nダウンロード完了。Excelに書き込んでいます...")
+
+        # 書き込み
+        excel.ScreenUpdating = False
+        p_cnt, x_cnt = 0, 0
+        for r in results:
+            if r["p_msg"]:
+                ws.Cells(r["row"], COL_PDF_RES).Value = r["p_msg"]
+                if "成功" in r["p_msg"]: p_cnt += 1
+            if r["x_msg"]:
+                ws.Cells(r["row"], COL_XBRL_RES).Value = r["x_msg"]
+                if "成功" in r["x_msg"]: x_cnt += 1
+        
+        wb.Save()
+        
+        # --- 時間計算 ---
+        total_elapsed = time.time() - script_start_time
+        dl_elapsed = dl_end_time - dl_start_time
+        avg_speed = dl_elapsed / len(tasks) if tasks else 0
+
+        print("\n" + "="*45)
+        print(f" 【処理結果概要】")
+        print(f"  総実行時間　: {int(total_elapsed // 60)}分 {int(total_elapsed % 60)}秒")
+        print(f"  DL純処理時間: {int(dl_elapsed // 60)}分 {int(dl_elapsed % 60)}秒")
+        print(f"  平均DL速度  : {avg_speed:.2f} 秒/件")
+        print(f"  新規PDF取得 : {p_cnt} 件")
+        print(f"  新規XBRL取得: {x_cnt} 件")
+        print("="*45)
+
     except Exception as e:
-        print(f"エラー: Excelファイルを開けませんでした。{e}")
-        return
-
-    ws = wb.Worksheets(SHEET_NAME)
-    # 最終行を取得
-    max_row = ws.Cells(ws.Rows.Count, "A").End(-4162).Row # -4162 = xlUp
-
-    # --- 列番号の定義 (実際のExcelに合わせました) ---
-    # A=1, B=2, C=3, D=4, E=5, ...
-    COL_FILENAME = 24 # X列: ファイル名(連番+...)
-    COL_PDF_URL = 5   # E列: PDF(ハイパーリンク)
-    COL_PDF_RES = 13  # M列: pdfDL
-    COL_XBRL_URL = 14 # N列: XBRL(ハイパーリンク)
-    COL_XBRL_RES = 15 # O列: xbrlDL
-    # ----------------------------------------------
-
-    print(f"処理を開始します (開始行: {START_ROW_INDEX} から {max_row} まで)")
-
-    pdf_count = 0
-    xbrl_count = 0
-
-    # 行のリストを作成
-    row_indices = list(range(START_ROW_INDEX, max_row + 1))
-
-    def process_row(r):
-        nonlocal pdf_count, xbrl_count
-        
-        # 1. PDFダウンロード
-        pdf_res_val = ws.Cells(r, COL_PDF_RES).Value
-        if pdf_res_val is None or str(pdf_res_val).strip() == "":
-            url_cell = ws.Cells(r, COL_PDF_URL)
-            url = url_cell.Hyperlinks(1).Address if url_cell.Hyperlinks.Count > 0 else url_cell.Value
-            fname = ws.Cells(r, COL_FILENAME).Value
-            
-            if fname and url and str(url).startswith("http"):
-                if not str(fname).lower().endswith('.pdf'): fname = str(fname) + '.pdf'
-                save_path = os.path.join(PDF_FOLDER, fname)
-                res = download_file(url, save_path)
-                ws.Cells(r, COL_PDF_RES).Value = get_timestamp_msg(res)
-                if "成功" in res: pdf_count += 1
-
-        # 2. XBRLダウンロード
-        xbrl_res_val = ws.Cells(r, COL_XBRL_RES).Value
-        if xbrl_res_val is None or str(xbrl_res_val).strip() == "":
-            url_cell = ws.Cells(r, COL_XBRL_URL)
-            url = url_cell.Hyperlinks(1).Address if url_cell.Hyperlinks.Count > 0 else url_cell.Value
-            fname = ws.Cells(r, COL_FILENAME).Value
-            
-            if fname and url and str(url).startswith("http"):
-                fname_zip = str(fname).replace('.pdf', '').replace('.PDF', '') + '.zip'
-                save_path = os.path.join(XBRL_FOLDER, fname_zip)
-                res = download_file(url, save_path)
-                ws.Cells(r, COL_XBRL_RES).Value = get_timestamp_msg(res)
-                if "成功" in res: xbrl_count += 1
-        
-        if r % 100 == 0:
-            print(f"進捗: {r} 行目をチェック中...")
-
-    # 並列実行
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        executor.map(process_row, row_indices)
-
-    # 上書き保存
-    wb.Save()
-    print(f"\n成功: {os.path.basename(EXCEL_FILE)} に直接書き込み保存しました。")
-
-    elapsed_sec = int(time.time() - start_time)
-    print("\n" + "="*40)
-    print(f" 処理完了！ ({elapsed_sec // 60}分 {elapsed_sec % 60}秒)")
-    print(f" 新規PDF: {pdf_count} 件 / 新規XBRL: {xbrl_count} 件")
-    print("="*40)
+        print(f"\n致命的なエラー: {e}")
+    finally:
+        if excel: excel.ScreenUpdating = True
+        ws = None; wb = None; excel = None
+        pythoncom.CoUninitialize()
+        print(f"--- スクリプト終了 [{datetime.now().strftime('%H:%M:%S')}] ---")
 
 if __name__ == "__main__":
     main()

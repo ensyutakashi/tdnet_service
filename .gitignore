@@ -6,3 +6,6 @@
 
 # .gitignore自体も保存対象にする
 !.gitignore
+
+# 特定のExcelファイルを許可する
+!TDnet適時開示情報.xlsm

@@ -13,7 +13,7 @@ import win32com.client  # pywin32を使用
 # 1. 設定エリア
 # =================================================================
 TARGET_FILE_PATH = r'\\LS720D7A9\TakashiBK\投資\TDNET\TDnet適時情報開示サービス\TDnet適時開示情報.xlsm'
-START_ROW = 40287
+START_ROW = 41326
 # =================================================================
 
 ERA_TO_YEAR = {

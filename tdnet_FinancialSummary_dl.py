@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(EXCEL_FILE)
 SHEET_NAME = '適時開示情報'
 PDF_FOLDER = os.path.join(BASE_DIR, "TDnet(決算短信)-PDF-随時追加分")
 XBRL_FOLDER = os.path.join(BASE_DIR, "TDnet(決算短信)XBRL-随時追加分")
-START_ROW_INDEX = 40287
+START_ROW_INDEX = 41326
 MAX_WORKERS = 15
 # ==========================================
 
